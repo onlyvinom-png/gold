@@ -119,11 +119,22 @@ export function computeRiskLevels(opts: RiskOptions): RiskResult {
   const tp1 = roundToTick(tp1Raw, opts.tickSize, opts.pricePrecision);
   const tp2 = roundToTick(tp2Raw, opts.tickSize, opts.pricePrecision);
 
-  if (dir === 'BUY' && (tp1 <= entry || tp2 <= entry)) {
-    return { ok: false, reason: 'Invalid take profit: BUY targets must be ABOVE the entry price.' };
-  }
-  if (dir === 'SELL' && (tp1 >= entry || tp2 <= entry)) {
-    return { ok: false, reason: 'Invalid take profit: SELL targets must be BELOW the entry price.' };
+  // Targets must sit on the correct side of the entry, and TP2 must be further
+  // away than TP1 (TP1 < TP2 for a BUY, TP1 > TP2 for a SELL).
+  if (dir === 'BUY') {
+    if (tp1 <= entry || tp2 <= entry) {
+      return { ok: false, reason: 'Invalid take profit: BUY targets must be ABOVE the entry price.' };
+    }
+    if (tp2 <= tp1) {
+      return { ok: false, reason: 'Invalid take profit: TP2 must be further from the entry than TP1.' };
+    }
+  } else {
+    if (tp1 >= entry || tp2 >= entry) {
+      return { ok: false, reason: 'Invalid take profit: SELL targets must be BELOW the entry price.' };
+    }
+    if (tp2 >= tp1) {
+      return { ok: false, reason: 'Invalid take profit: TP2 must be further from the entry than TP1.' };
+    }
   }
 
   const reward1 = Math.abs(tp1 - entry);
