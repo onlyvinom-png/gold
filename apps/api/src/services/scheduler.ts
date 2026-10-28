@@ -12,6 +12,20 @@ let lastRunDurationMs: number | null = null;
 let lastRunStatus: 'OK' | 'NO_TRADE' | 'ERROR' | 'SKIPPED' | null = null;
 let lastRunMessage: string | null = null;
 let consecutiveFailures = 0;
+let schedulerStartedAt: string | null = null;
+
+/**
+ * ISO timestamp of the next scheduled analysis cycle.
+ * The scheduler uses a fixed interval, so the next run is the last completed
+ * run (or the scheduler start) plus one interval.
+ */
+function computeNextRunAt(): string | null {
+  if (!timer || !env.SCHEDULER_ENABLED) return null;
+  const base = lastRunAt ?? schedulerStartedAt;
+  if (!base) return null;
+  const next = new Date(base).getTime() + env.ANALYSIS_INTERVAL_MINUTES * 60_000;
+  return new Date(next).toISOString();
+}
 
 export function getSchedulerState() {
   return {
@@ -23,6 +37,7 @@ export function getSchedulerState() {
     lastRunStatus,
     lastRunMessage,
     consecutiveFailures,
+    nextRunAt: computeNextRunAt(),
   };
 }
 
