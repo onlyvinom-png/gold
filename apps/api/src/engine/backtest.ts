@@ -28,13 +28,13 @@ export interface BacktestConfig {
   entryType: 'confirmation_close' | 'next_bar_open';
   pricePrecision: number;
   tickSize: number;
-  /** spread cost applied per trade, in price units */
+  /** spread cost per trade in price units */
   spread: number;
-  /** slippage applied per trade, in price units */
+  /** slippage per trade in price units */
   slippage: number;
-  /** commission per trade, in account currency units */
+  /** commission per trade in account currency units */
   fee: number;
-  /** how many candles a trade may stay open before it is closed as unresolved */
+  /** maximum number of candles a trade may stay open */
   maxHoldingCandles: number;
 }
 
@@ -62,21 +62,158 @@ export interface BacktestResult {
   trades: BacktestTrade[];
 }
 
+interface ExitPlan {
+  outcome: BacktestTrade['outcome'];
+  exitTime: string | null;
+  exitPrice: number | null;
+  realizedR: number;
+}
+
 /**
- * Walk-forward backtest.
+ * Resolve a single trade against the candles that come AFTER the entry.
  *
- * LOOK-AHEAD SAFETY: for every evaluation point the engine only ever sees the
- * candles up to and including the confirmation candle. The profile is computed
- * from candles that are strictly older than the profile range end, and trade
- * outcomes are resolved with candles that come strictly AFTER the entry.
+ * LOOK-AHEAD SAFETY: the resolver only receives candles with an index strictly
+ * greater than the entry index, so the outcome can never influence the entry.
  *
- * INTRABAR AMBIGUITY: when a single candle touches both the stop and a target,
- * the STOP is assumed to be hit first (the conservative assumption).
+ * INTRABAR AMBIGUITY: when a candle touches both the stop and a target the
+ * STOP is assumed to be hit first (the conservative assumption).
+ */
+export function resolveTrade(
+  direction: 'BUY' | 'SELL',
+  entry: number,
+  stop: number,
+  tp1: number,
+  tp2: number,
+  entryIndex: number,
+  candles: Candle[],
+  maxHoldingCandles: number,
+): ExitPlan {
+  const risk = Math.abs(entry - stop);
+  const lastIndex = Math.min(candles.length - 1, entryIndex + maxHoldingCandles);
+  if (risk <= 0) {
+    return { outcome: 'UNRESOLVED', exitTime: null, exitPrice: null, realizedR: 0 };
+  }
+
+  for (let j = entryIndex + 1; j <= lastIndex; j += 1) {
+    const c = candles[j];
+    const hitStop = direction === 'BUY' ? c.low <= stop : c.high >= stop;
+    const hitTp2 = direction === 'BUY' ? c.high >= tp2 : c.low <= tp2;
+    const hitTp1 = direction === 'BUY' ? c.high >= tp1 : c.low <= tp1;
+
+    if (hitStop) {
+      return {
+        outcome: 'STOP_HIT',
+        exitTime: c.time,
+        exitPrice: stop,
+        realizedR: -1,
+      };
+    }
+    if (hitTp2) {
+      const r = Math.abs(tp2 - entry) / risk;
+      return { outcome: 'TARGET_HIT', exitTime: c.time, exitPrice: tp2, realizedR: Number(r.toFixed(4)) };
+    }
+    if (hitTp1) {
+      // Half the position is closed at TP1, the remainder runs to TP2 or the stop.
+      const halfR = (Math.abs(tp1 - entry) / risk) * 0.5;
+      let r = halfR;
+      let exitTime: string | null = c.time;
+      let exitPrice: number | null = tp1;
+      let resolved = false;
+      for (let k = j + 1; k <= lastIndex; k += 1) {
+        const d = candles[k];
+        const stopHit = direction === 'BUY' ? d.low <= stop : d.high >= stop;
+        const tp2Hit = direction === 'BUY' ? d.high >= tp2 : d.low <= tp2;
+        if (stopHit) {
+          r += -0.5;
+          exitTime = d.time;
+          exitPrice = stop;
+          resolved = true;
+          break;
+        }
+        if (tp2Hit) {
+          r += (Math.abs(tp2 - entry) / risk) * 0.5;
+          exitTime = d.time;
+          exitPrice = tp2;
+          resolved = true;
+          break;
+        }
+      }
+      if (!resolved) {
+        const last = candles[lastIndex];
+        const unreal =
+          direction === 'BUY' ? (last.close - entry) / risk : (entry - last.close) / risk;
+        r += unreal * 0.5;
+      }
+      return {
+        outcome: 'TARGET_HIT',
+        exitTime,
+        exitPrice,
+        realizedR: Number(r.toFixed(4)),
+      };
+    }
+  }
+
+  const last = candles[lastIndex];
+  const unreal = direction === 'BUY' ? (last.close - entry) / risk : (entry - last.close) / risk;
+  return {
+    outcome: 'UNRESOLVED',
+    exitTime: last.time,
+    exitPrice: null,
+    realizedR: Number(unreal.toFixed(4)),
+  };
+}
+
+function summarise(
+  base: BacktestSummary,
+  trades: BacktestTrade[],
+  inSample: boolean,
+  extraNotes: string[],
+): BacktestSummary {
+  const wins = trades.filter((t) => t.outcome === 'TARGET_HIT').length;
+  const losses = trades.filter((t) => t.outcome === 'STOP_HIT').length;
+  const unresolved = trades.filter((t) => t.outcome === 'UNRESOLVED').length;
+  const resolved = wins + losses;
+  const sumR = trades.reduce((s, t) => s + t.realizedR, 0);
+  return {
+    ...base,
+    trades: trades.length,
+    wins,
+    losses,
+    unresolved,
+    winRate: resolved > 0 ? Number(((wins / resolved) * 100).toFixed(2)) : null,
+    averageR: trades.length ? Number((sumR / trades.length).toFixed(4)) : null,
+    expectancy: resolved > 0 ? Number((sumR / resolved).toFixed(4)) : null,
+    maxDrawdownR: maxDrawdown(trades),
+    totalFees: Number(trades.reduce((s, t) => s + t.fees, 0).toFixed(6)),
+    inSample,
+    notes: [...base.notes, ...extraNotes],
+  };
+}
+
+function maxDrawdown(trades: BacktestTrade[]): number | null {
+  if (!trades.length) return null;
+  let equity = 0;
+  let peak = 0;
+  let maxDd = 0;
+  for (const t of trades) {
+    equity += t.realizedR;
+    if (equity > peak) peak = equity;
+    const dd = peak - equity;
+    if (dd > maxDd) maxDd = dd;
+  }
+  return Number(maxDd.toFixed(4));
+}
+
+/**
+ * Walk-forward backtest over historical candles.
+ *
+ * LOOK-AHEAD SAFETY: the engine only ever sees candles up to and including the
+ * confirmation candle for each evaluation step. The Volume Profile is computed
+ * from those candles only, and the trade outcome is resolved with strictly
+ * later candles.
  */
 export function runBacktest(candles: Candle[], config: BacktestConfig): BacktestResult {
   const notes: string[] = [];
-  const trades: BacktestTrade[] = [];
-  let totalFees = 0;
 
   if (candles.length < 60) {
     return {
@@ -106,10 +243,13 @@ export function runBacktest(candles: Candle[], config: BacktestConfig): Backtest
     };
   }
 
+  const trades: BacktestTrade[] = [];
   const warmup = Math.max(config.atrPeriod * 3, 40);
   let lastSignalIndex = -1;
 
   for (let i = warmup; i < candles.length - 2; i += 1) {
+    if (lastSignalIndex >= 0 && i - lastSignalIndex < config.maxHoldingCandles) continue;
+
     const slice = candles.slice(0, i + 1);
     const now = new Date(candles[i].time);
     const atr = calculateAtr(slice, config.atrPeriod);
@@ -132,9 +272,7 @@ export function runBacktest(candles: Candle[], config: BacktestConfig): Backtest
       retestZoneAtrFraction: config.retestZoneAtrFraction,
       atr,
     });
-    if (!br.found || !br.direction || br.confirmationIndex === null) continue;
-    if (br.confirmationIndex !== i) continue; // only act on the newest confirmation
-    if (lastSignalIndex >= 0 && i - lastSignalIndex < config.maxHoldingCandles) continue;
+    if (!br.found || !br.direction || br.confirmationIndex !== i) continue;
 
     const nextCandle = candles[i + 1] ?? null;
     const risk = computeRiskLevels({
@@ -163,7 +301,7 @@ export function runBacktest(candles: Candle[], config: BacktestConfig): Backtest
     const entryCandle = candles[entryIndex];
     const dir = br.direction;
 
-    // Apply spread + slippage to the entry (worse price for the trader).
+    // Worsen the entry by half the spread plus slippage.
     const entry =
       dir === 'BUY'
         ? levels.entry + config.spread / 2 + config.slippage
@@ -171,153 +309,41 @@ export function runBacktest(candles: Candle[], config: BacktestConfig): Backtest
     const stop = dir === 'BUY' ? levels.stopLoss - config.spread / 2 : levels.stopLoss + config.spread / 2;
     const tp1 = dir === 'BUY' ? levels.tp1 - config.spread / 2 : levels.tp1 + config.spread / 2;
     const tp2 = dir === 'BUY' ? levels.tp2 - config.spread / 2 : levels.tp2 + config.spread / 2;
-    const risk = Math.abs(entry - stop);
-    if (risk <= 0) continue;
+    if (Math.abs(entry - stop) <= 0) continue;
 
-    let outcome: BacktestTrade['outcome'] = 'UNRESOLVED';
-    let exitTime: string | null = null;
-    let exitPrice: number | null = null;
-    const maxIndex = Math.min(candles.length - 1, entryIndex + config.maxHoldingCandles);
-    for (let j = entryIndex + 1; j <= maxIndex; j += 1) {
-      const c = candles[j];
-      const hitStop = dir === 'BUY' ? c.low <= stop : c.high >= stop;
-      const hitTp2 = dir === 'BUY' ? c.high >= tp2 : c.low <= tp2;
-      const hitTp1 = dir === 'BUY' ? c.high >= tp1 : c.low <= tp1;
-      if (hitStop) {
-        outcome = 'STOP_HIT';
-        exitTime = c.time;
-        exitPrice = stop;
-        break;
-      }
-      if (hitTp2) {
-        outcome = 'TARGET_HIT';
-        exitTime = c.time;
-        exitPrice = tp2;
-        break;
-      }
-      if (hitTp1) {
-        // TP1 hit: close half at TP1 and let the rest run to TP2 or the stop.
-        const half = risk > 0 ? (Math.abs(tp1 - entry) / risk) * 0.5 : 0;
-        let r = half;
-        let resolved = false;
-        for (let k = j + 1; k <= maxIndex; k += 1) {
-          const d = candles[k];
-          const stopHit = dir === 'BUY' ? d.low <= stop : d.high >= stop;
-          const tp2Hit = dir === 'BUY' ? d.high >= tp2 : d.low <= tp2;
-          if (stopHit) {
-            r += (dir === 'BUY' ? -1 : 1) * 0.5;
-            exitTime = d.time;
-            exitPrice = stop;
-            resolved = true;
-            break;
-          }
-          if (tp2Hit) {
-            r += 0.5 * (Math.abs(tp2 - entry) / risk);
-            exitTime = d.time;
-            exitPrice = tp2;
-            resolved = true;
-            break;
-          }
-        }
-        outcome = 'TARGET_HIT';
-        exitTime = exitTime ?? c.time;
-        exitPrice = exitPrice ?? tp1;
-        if (!resolved) {
-          const last = candles[maxIndex];
-          const unreal = dir === 'BUY' ? (last.close - entry) / risk : (entry - last.close) / risk;
-          r += unreal * 0.5;
-        }
-        trades.push({
-          direction: dir,
-          entryTime: entryCandle.time,
-          entry: Number(entry.toFixed(config.pricePrecision)),
-          stopLoss: Number(stop.toFixed(config.pricePrecision)),
-          tp1: Number(tp1.toFixed(config.pricePrecision)),
-          tp2: Number(tp2.toFixed(config.pricePrecision)),
-          outcome,
-          exitTime,
-          exitPrice: exitPrice === null ? null : Number(exitPrice.toFixed(config.pricePrecision)),
-          realizedR: Number(r.toFixed(4)),
-          fees: config.fee,
-          profileRangeStart: profile.rangeStart,
-          profileRangeEnd: profile.rangeEnd,
-          vah: profile.vah?.binHigh ?? 0,
-          val: profile.val?.binLow ?? 0,
-          poc: profile.poc?.price ?? null,
-        });
-        totalFees += config.fee;
-        lastSignalIndex = i;
-        goto nextEvaluation;
-      }
-    }
-    if (outcome === 'UNRESOLVED') {
-      const last = candles[maxIndex];
-      const unreal = dir === 'BUY' ? (last.close - entry) / risk : (entry - last.close) / risk;
-      trades.push({
-        direction: dir,
-        entryTime: entryCandle.time,
-        entry: Number(entry.toFixed(config.pricePrecision)),
-        stopLoss: Number(stop.toFixed(config.pricePrecision)),
-        tp1: Number(tp1.toFixed(config.pricePrecision)),
-        tp2: Number(tp2.toFixed(config.pricePrecision)),
-        outcome,
-        exitTime: candles[maxIndex].time,
-        exitPrice: null,
-        realizedR: Number(unreal.toFixed(4)),
-        fees: config.fee,
-        profileRangeStart: profile.rangeStart,
-        profileRangeEnd: profile.rangeEnd,
-        vah: profile.vah?.binHigh ?? 0,
-        val: profile.val?.binLow ?? 0,
-        poc: profile.poc?.price ?? null,
-      });
-      totalFees += config.fee;
-      lastSignalIndex = i;
-    }
-    nextEvaluation: {
-      // label used with goto
-    }
-  }
+    const plan = resolveTrade(dir, entry, stop, tp1, tp2, entryIndex, candles, config.maxHoldingCandles);
 
-  const wins = trades.filter((t) => t.outcome === 'TARGET_HIT').length;
-  const losses = trades.filter((t) => t.outcome === 'STOP_HIT').length;
-  const unresolved = trades.filter((t) => t.outcome === 'UNRESOLVED').length;
-  const resolved = wins + losses;
-  const winRate = resolved > 0 ? Number(((wins / resolved) * 100).toFixed(2)) : null;
-  const avgR = trades.length ? Number((trades.reduce((s, t) => s + t.realizedR, 0) / trades.length).toFixed(4)) : null;
-
-  // Expectancy in R (resolved trades only).
-  let expectancy: number | null = null;
-  if (resolved > 0) {
-    const sum = trades.reduce((s, t) => s + t.realizedR, 0);
-    expectancy = Number((sum / resolved).toFixed(4));
-  }
-
-  // Maximum drawdown in R over the chronological equity (R) curve.
-  let maxDrawdownR: number | null = null;
-  if (trades.length) {
-    let equity = 0;
-    let peak = 0;
-    let maxDd = 0;
-    for (const t of trades) {
-      equity += t.realizedR;
-      if (equity > peak) peak = equity;
-      const dd = peak - equity;
-      if (dd > maxDd) maxDd = dd;
-    }
-    maxDrawdownR = Number(maxDd.toFixed(4));
+    trades.push({
+      direction: dir,
+      entryTime: entryCandle.time,
+      entry: Number(entry.toFixed(config.pricePrecision)),
+      stopLoss: Number(stop.toFixed(config.pricePrecision)),
+      tp1: Number(tp1.toFixed(config.pricePrecision)),
+      tp2: Number(tp2.toFixed(config.pricePrecision)),
+      outcome: plan.outcome,
+      exitTime: plan.exitTime,
+      exitPrice: plan.exitPrice === null ? null : Number(plan.exitPrice.toFixed(config.pricePrecision)),
+      realizedR: plan.realizedR,
+      fees: config.fee,
+      profileRangeStart: profile.rangeStart,
+      profileRangeEnd: profile.rangeEnd,
+      vah: profile.vah?.binHigh ?? 0,
+      val: profile.val?.binLow ?? 0,
+      poc: profile.poc?.price ?? null,
+    });
+    lastSignalIndex = i;
   }
 
   notes.push(
-    `Spread ${config.spread} and slippage ${config.slippage} (price units) and fee ${config.fee} applied per trade.`,
+    `Spread ${config.spread} and slippage ${config.slippage} (price units) plus fee ${config.fee} applied per trade.`,
   );
   notes.push('When a candle touches both the stop and a target, the STOP is assumed to be hit first (conservative).');
-  notes.push('Profile and indicators are computed only from candles available before the confirmation candle (no look-ahead).');
+  notes.push('Profile, ATR and signals use only candles available before the confirmation candle (no look-ahead).');
   if (trades.length < 30) {
     notes.push(`Sample size is small (${trades.length} trades) — treat the statistics as indicative only.`);
   }
 
-  const summary: BacktestSummary = {
+  const base: BacktestSummary = {
     label: 'backtest',
     symbol: config.symbol,
     timeframe: config.timeframe,
@@ -325,14 +351,14 @@ export function runBacktest(candles: Candle[], config: BacktestConfig): Backtest
     to: candles[candles.length - 1].time,
     sampleSize: candles.length,
     trades: trades.length,
-    wins,
-    losses,
-    unresolved,
-    winRate,
-    averageR: avgR,
-    expectancy,
-    maxDrawdownR,
-    totalFees: Number(totalFees.toFixed(6)),
+    wins: 0,
+    losses: 0,
+    unresolved: 0,
+    winRate: null,
+    averageR: null,
+    expectancy: null,
+    maxDrawdownR: null,
+    totalFees: 0,
     spreadAssumption: config.spread,
     slippageAssumption: config.slippage,
     inSample: false,
@@ -340,10 +366,10 @@ export function runBacktest(candles: Candle[], config: BacktestConfig): Backtest
     notes,
   };
 
-  return { summary, trades };
+  return { summary: summarise(base, trades, false, []), trades };
 }
 
-/** Split a result into an in-sample and an out-of-sample half (chronological). */
+/** Split the trade sequence chronologically into in-sample and out-of-sample halves. */
 export function splitInOutOfSample(result: BacktestResult): {
   inSample: BacktestResult;
   outOfSample: BacktestResult;
@@ -351,33 +377,13 @@ export function splitInOutOfSample(result: BacktestResult): {
   const half = Math.floor(result.trades.length / 2);
   const inTrades = result.trades.slice(0, half);
   const outTrades = result.trades.slice(half);
-  const build = (trades: BacktestTrade[], inSample: boolean): BacktestResult => {
-    const wins = trades.filter((t) => t.outcome === 'TARGET_HIT').length;
-    const losses = trades.filter((t) => t.outcome === 'STOP_HIT').length;
-    const unresolved = trades.filter((t) => t.outcome === 'UNRESOLVED').length;
-    const resolved = wins + losses;
-    const summary: BacktestSummary = {
-      ...result.summary,
-      trades: trades.length,
-      wins,
-      losses,
-      unresolved,
-      winRate: resolved > 0 ? Number(((wins / resolved) * 100).toFixed(2)) : null,
-      averageR: trades.length
-        ? Number((trades.reduce((s, t) => s + t.realizedR, 0) / trades.length).toFixed(4))
-        : null,
-      expectancy: resolved > 0
-        ? Number((trades.reduce((s, t) => s + t.realizedR, 0) / resolved).toFixed(4))
-        : null,
-      inSample,
-      notes: [
-        ...result.summary.notes,
-        inSample
-          ? 'IN-SAMPLE segment (first half of the trade sequence).'
-          : 'OUT-OF-SAMPLE segment (second half of the trade sequence).',
-      ],
-    };
-    return { summary, trades };
-  };
+  const build = (trades: BacktestTrade[], inSample: boolean): BacktestResult => ({
+    summary: summarise(result.summary, trades, inSample, [
+      inSample
+        ? 'IN-SAMPLE segment (first half of the trade sequence).'
+        : 'OUT-OF-SAMPLE segment (second half of the trade sequence).',
+    ]),
+    trades,
+  });
   return { inSample: build(inTrades, true), outOfSample: build(outTrades, false) };
 }
