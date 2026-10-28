@@ -143,17 +143,28 @@ export interface StrategyVersion {
   symbol: string;
   timeframe: string;
   timezone: string;
+  sessionStart: string;
+  sessionEnd: string;
+  profileLookbackDays: number;
   valueAreaPercent: number;
   binSize: number | null;
   retestWindowCandles: number;
+  retestZoneTicks: number;
+  retestZoneAtrFraction: number;
   atrPeriod: number;
   atrFallbackEnabled: boolean;
+  stopBufferTicks: number;
+  stopBufferAtrFraction: number;
+  maxStopAtr: number;
+  minStopTicks: number;
   rrTarget1: number;
   rrTarget2: number;
   minRiskReward: number;
   entryType: string;
   pricePrecision: number;
   tickSize: number;
+  riskPerTradePercent: number | null;
+  maxSignalAgeMinutes: number;
   notes: string;
   createdAt: string;
 }
