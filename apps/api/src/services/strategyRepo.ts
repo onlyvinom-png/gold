@@ -142,9 +142,9 @@ export async function saveStrategy(
   return mapRow(res.rows[0]);
 }
 
-function stripNulls(obj: Record<string, unknown>): Record<string, unknown> {
+function stripNulls(obj: object): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
     if (v !== null && v !== undefined) out[k] = v;
   }
   return out;
