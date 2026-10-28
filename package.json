@@ -1,0 +1,17 @@
+{
+  "name": "goldscope-ai",
+  "private": true,
+  "version": "1.0.0",
+  "description": "GoldScope AI - XAUUSD analysis platform (Volume Profile + Break & Retest)",
+  "workspaces": ["packages/shared", "apps/api", "apps/web"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "npm run build --workspace @goldscope/api && npm run build --workspace @goldscope/web",
+    "typecheck": "npm run typecheck --workspace @goldscope/shared && npm run typecheck --workspace @goldscope/api && npm run typecheck --workspace @goldscope/web",
+    "test": "npm run test --workspace @goldscope/api && npm run test --workspace @goldscope/web",
+    "dev:api": "npm run dev --workspace @goldscope/api",
+    "dev:web": "npm run dev --workspace @goldscope/web",
+    "db:migrate": "npm run db:migrate --workspace @goldscope/api",
+    "db:seed": "npm run db:seed --workspace @goldscope/api"
+  }
+}
