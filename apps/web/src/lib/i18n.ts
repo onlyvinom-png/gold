@@ -129,7 +129,7 @@ const ar = {
     status: 'الحالة',
     timeframe: 'الإطار الزمني',
     source: 'المصدر',
-    applied: 'إ总数',
+    applied: 'مُطبَّق',
     reset: 'إعادة تعيين',
     total: 'الإجمالي',
     showing: 'عرض',

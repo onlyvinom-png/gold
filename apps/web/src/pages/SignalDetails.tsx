@@ -96,7 +96,7 @@ export function SignalDetails() {
       </header>
 
       <div className="card card-pad grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat label={t.signal.instrument ?? t.dashboard.instrument} value={<span dir="ltr">{s.instrument}</span>} />
+        <Stat label={t.dashboard.instrument} value={<span dir="ltr">{s.instrument}</span>} />
         <Stat label={t.dashboard.timeframe} value={<span dir="ltr">{s.timeframe}</span>} />
         <Stat label={t.signal.created} value={formatDateTime(s.createdAt, lang)} />
         <Stat label={t.signal.updated} value={formatDateTime(s.updatedAt, lang)} />
