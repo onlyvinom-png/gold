@@ -180,6 +180,7 @@ export interface StrategyConfig {
   timezone: string;
   sessionStart: string;
   sessionEnd: string;
+  profileLookbackDays: number;
   valueAreaPercent: number;
   binSize: number | null;
   retestWindowCandles: number;
