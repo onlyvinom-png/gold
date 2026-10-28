@@ -303,7 +303,7 @@ export async function runAnalysis(opts: RunAnalysisOptions = {}): Promise<RunAna
     passed: true,
     detail: `Entry ${risk.levels.entry}, SL ${risk.levels.stopLoss}, TP1 ${risk.levels.tp1} (R:R ${risk.levels.riskReward1})`,
   });
-  notes.push(...risk.levels.stopLossBasis ? [`Stop loss basis: ${risk.levels.stopLossBasis}.`] : []);
+  if (risk.levels.stopLossBasis) notes.push(`Stop loss basis: ${risk.levels.stopLossBasis}.`);
 
   const evidence: SignalEvidence = {
     profile,
